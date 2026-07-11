@@ -5,18 +5,28 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox, QSpinBox, QLineEdit, QPushButton, QGroupBox, QFormLayout,
     QComboBox, QListWidget, QListWidgetItem
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 
 from settings import OverlaySettings, DEFAULT_FIELDS_VISIBLE, INCOME_CURRENCIES
 from theme import THEME_PRESETS
+from version import __version__ as APP_VERSION
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings: OverlaySettings, on_apply, parent=None) -> None:
+    def __init__(self, settings: OverlaySettings, on_apply, on_check_updates=None, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("HaulHUD Settings")
         self.setMinimumWidth(380)
         self.settings = settings
         self.on_apply = on_apply
+        # Callback into HaulHUDApp's existing update-check machinery
+        # (UpdateCheckWorker / check_for_update) rather than duplicating
+        # networking/threading here. Signature:
+        #   on_check_updates(on_result, on_error) -> None
+        # where on_result(info: UpdateInfo | None) and on_error(msg: str).
+        self.on_check_updates = on_check_updates
+        self._checking_updates = False
+        self._closed = False
 
         layout = QVBoxLayout(self)
 
@@ -119,6 +129,33 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(behavior_box)
 
+        updates_box = QGroupBox("Updates")
+        updates_layout = QVBoxLayout(updates_box)
+
+        updates_row = QHBoxLayout()
+        self.version_label = QLabel(f"Current version: v{APP_VERSION}")
+        self.version_label.setProperty("role", "fieldLabel")
+        updates_row.addWidget(self.version_label)
+        updates_row.addStretch()
+
+        self.check_updates_btn = QPushButton("Check for Updates")
+        self.check_updates_btn.clicked.connect(self._check_for_updates_clicked)
+        self.check_updates_btn.setEnabled(self.on_check_updates is not None)
+        updates_row.addWidget(self.check_updates_btn)
+        updates_layout.addLayout(updates_row)
+
+        self.update_status_label = QLabel("")
+        self.update_status_label.setWordWrap(True)
+        updates_layout.addWidget(self.update_status_label)
+
+        self._pending_release_url: str | None = None
+        self.view_release_btn = QPushButton("View Release")
+        self.view_release_btn.clicked.connect(self._open_pending_release)
+        self.view_release_btn.setVisible(False)
+        updates_layout.addWidget(self.view_release_btn)
+
+        layout.addWidget(updates_box)
+
         fields_box = QGroupBox("Fields shown")
         fields_layout = QVBoxLayout(fields_box)
         self.field_checks: dict[str, QCheckBox] = {}
@@ -154,6 +191,48 @@ class SettingsDialog(QDialog):
         button_row.addWidget(save_btn)
         layout.addLayout(button_row)
 
+    def _check_for_updates_clicked(self) -> None:
+        if self.on_check_updates is None or self._checking_updates:
+            return
+        self._checking_updates = True
+        self.check_updates_btn.setEnabled(False)
+        self.check_updates_btn.setText("Checking...")
+        self.update_status_label.setText("")
+        self.on_check_updates(self._on_update_result, self._on_update_error)
+
+    def _reset_check_button(self) -> None:
+        self._checking_updates = False
+        self.check_updates_btn.setEnabled(True)
+        self.check_updates_btn.setText("Check for Updates")
+
+    def _on_update_result(self, info) -> None:
+        if self._closed:
+            return
+        self._reset_check_button()
+        if info is None:
+            self.update_status_label.setText(f"You're up to date (v{APP_VERSION}).")
+            self.view_release_btn.setVisible(False)
+            self._pending_release_url = None
+            return
+        self.update_status_label.setText(
+            f"v{info.latest_version} is available (you have v{APP_VERSION})."
+        )
+        self._pending_release_url = info.release_url
+        self.view_release_btn.setVisible(True)
+
+    def _open_pending_release(self) -> None:
+        if not self._pending_release_url:
+            return
+        QDesktopServices.openUrl(QUrl(self._pending_release_url))
+
+    def _on_update_error(self, message: str) -> None:
+        if self._closed:
+            return
+        self._reset_check_button()
+        self.update_status_label.setText(f"Update check failed: {message}")
+        self.view_release_btn.setVisible(False)
+        self._pending_release_url = None
+
     def _on_currency_changed(self, code: str) -> None:
         if code in INCOME_CURRENCIES:
             _, rate = INCOME_CURRENCIES[code]
@@ -185,3 +264,11 @@ class SettingsDialog(QDialog):
         s.save()
         self.on_apply()
         self.accept()
+
+    def reject(self) -> None:
+        self._closed = True
+        super().reject()
+
+    def accept(self) -> None:
+        self._closed = True
+        super().accept()

@@ -62,6 +62,7 @@ class HaulHUDApp:
         self.tray.show()
 
         self.update_check_worker: UpdateCheckWorker | None = None
+        self._dialog_update_worker: UpdateCheckWorker | None = None
         self._update_check_is_silent = True
         self._pending_update_info: UpdateInfo | None = None
         self.tray.messageClicked.connect(self._on_tray_message_clicked)
@@ -115,8 +116,26 @@ class HaulHUDApp:
             self._open_settings()
 
     def _open_settings(self) -> None:
-        dialog = SettingsDialog(self.settings, on_apply=self._on_settings_applied)
+        dialog = SettingsDialog(
+            self.settings,
+            on_apply=self._on_settings_applied,
+            on_check_updates=self._check_for_updates_for_dialog,
+        )
         dialog.exec()
+
+    def _check_for_updates_for_dialog(self, on_result, on_error) -> None:
+        # Runs on its own worker instance so the Settings dialog's button
+        # stays responsive regardless of whether a tray-triggered check
+        # (silent startup check or "Check for Updates..." in the tray
+        # menu) happens to be in flight at the same time -- that path's
+        # single-worker "already running" guard is specifically about
+        # not duplicating tray balloons/dialogs, not about this button.
+        worker = UpdateCheckWorker(APP_VERSION)
+        # Keep a reference so it isn't garbage-collected mid-check.
+        self._dialog_update_worker = worker
+        worker.checked_ok.connect(on_result)
+        worker.failed.connect(on_error)
+        worker.start()
 
     def _on_settings_applied(self) -> None:
         self.window.apply_settings_changed()
