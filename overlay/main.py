@@ -3,13 +3,15 @@ from __future__ import annotations
 import sys
 import os
 
-from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
-from PySide6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor
-from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
+from PySide6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QDesktopServices
+from PySide6.QtCore import Qt, QThread, QUrl, Signal
 
 from settings import OverlaySettings
 from overlay_window import OverlayWindow
 from settings_dialog import SettingsDialog
+from update_checker import UpdateCheckError, UpdateInfo, check_for_update
+from version import __version__ as APP_VERSION
 
 def _make_tray_icon(accent_hex: str) -> QIcon:
     size = 64
@@ -29,6 +31,23 @@ def _make_tray_icon(accent_hex: str) -> QIcon:
     painter.end()
     return QIcon(pixmap)
 
+class UpdateCheckWorker(QThread):
+    checked_ok = Signal(object)  # UpdateInfo | None
+    failed = Signal(str)
+
+    def __init__(self, current_version: str) -> None:
+        super().__init__()
+        self.current_version = current_version
+
+    def run(self) -> None:
+        try:
+            info = check_for_update(self.current_version)
+            self.checked_ok.emit(info)
+        except UpdateCheckError as e:
+            self.failed.emit(str(e))
+        except Exception as e:  # noqa: BLE001 - surface unexpected errors too
+            self.failed.emit(f"Unexpected error: {e}")
+
 class HaulHUDApp:
     def __init__(self) -> None:
         self.app = QApplication(sys.argv)
@@ -42,6 +61,18 @@ class HaulHUDApp:
         self._build_tray_menu()
         self.tray.show()
 
+        self.update_check_worker: UpdateCheckWorker | None = None
+        self._update_check_is_silent = True
+        self._pending_update_info: UpdateInfo | None = None
+        self.tray.messageClicked.connect(self._on_tray_message_clicked)
+
+        # Silent check on launch: a balloon notification only appears if an
+        # update is actually found -- a flaky connection or a rate-limited
+        # GitHub API shouldn't interrupt startup with anything. The tray
+        # menu's "Check for Updates..." runs the same check non-silently
+        # for an explicit result either way.
+        self._check_for_updates(silent=True)
+
     def _build_tray_menu(self) -> None:
         menu = QMenu()
 
@@ -53,6 +84,12 @@ class HaulHUDApp:
         settings_action = QAction("Settings...")
         settings_action.triggered.connect(self._open_settings)
         menu.addAction(settings_action)
+
+        menu.addSeparator()
+
+        check_updates_action = QAction("Check for Updates...")
+        check_updates_action.triggered.connect(lambda: self._check_for_updates(silent=False))
+        menu.addAction(check_updates_action)
 
         menu.addSeparator()
 
@@ -84,6 +121,63 @@ class HaulHUDApp:
     def _on_settings_applied(self) -> None:
         self.window.apply_settings_changed()
         self._sync_toggle_label()
+
+    def _check_for_updates(self, silent: bool) -> None:
+        if self.update_check_worker is not None and self.update_check_worker.isRunning():
+            return
+        self._update_check_is_silent = silent
+        self.update_check_worker = UpdateCheckWorker(APP_VERSION)
+        self.update_check_worker.checked_ok.connect(self._on_update_check_ok)
+        self.update_check_worker.failed.connect(self._on_update_check_failed)
+        self.update_check_worker.start()
+
+    def _on_update_check_ok(self, info: object) -> None:
+        if info is not None:
+            self._pending_update_info = info
+            if self._update_check_is_silent:
+                # Balloon notification rather than a blocking dialog --
+                # this can fire during a live drive with the game running,
+                # so it needs to be glanceable and dismissible rather than
+                # stealing focus. Clicking it opens the release page (see
+                # _on_tray_message_clicked); "Check for Updates..." in the
+                # tray menu re-shows this with a direct link either way.
+                self.tray.showMessage(
+                    "HaulHUD update available",
+                    f"v{info.latest_version} is available (you have v{APP_VERSION}). "
+                    "Click here, or use Check for Updates in the tray menu, to view it.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    8000,
+                )
+            else:
+                box = QMessageBox()
+                box.setWindowTitle("Update available")
+                box.setIcon(QMessageBox.Icon.Information)
+                box.setText(
+                    f"A new version is available: v{info.latest_version}\n"
+                    f"You have: v{APP_VERSION}"
+                )
+                view_btn = box.addButton("View Release", QMessageBox.ButtonRole.AcceptRole)
+                box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+                box.exec()
+                if box.clickedButton() is view_btn:
+                    QDesktopServices.openUrl(QUrl(info.release_url))
+        elif not self._update_check_is_silent:
+            QMessageBox.information(
+                None,
+                "No updates available",
+                f"You're running the latest version (v{APP_VERSION}).",
+            )
+
+    def _on_update_check_failed(self, message: str) -> None:
+        # A silent startup check failing (no network, GitHub rate limit,
+        # etc.) shouldn't interrupt or notify at all -- only a manually
+        # triggered "Check for Updates..." surfaces the failure directly.
+        if not self._update_check_is_silent:
+            QMessageBox.warning(None, "Update check failed", message)
+
+    def _on_tray_message_clicked(self) -> None:
+        if self._pending_update_info is not None:
+            QDesktopServices.openUrl(QUrl(self._pending_update_info.release_url))
 
     def _quit(self) -> None:
         self.window.close()
