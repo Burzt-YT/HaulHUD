@@ -21,7 +21,7 @@ def build_qss(settings: OverlaySettings) -> str:
     size = settings.font_size
 
     return f"""
-    #RootPanel {{
+    QFrame#RootPanel {{
         background-color: {bg};
         border-radius: {radius}px;
         border: 1px solid rgba(255, 255, 255, 28);

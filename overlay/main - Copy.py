@@ -5,12 +5,12 @@ import os
 
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
 from PySide6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QDesktopServices
-from PySide6.QtCore import Qt, QThread, QUrl, Signal, QTimer
+from PySide6.QtCore import Qt, QThread, QUrl, Signal
 
 from settings import OverlaySettings
 from overlay_window import OverlayWindow
 from settings_dialog import SettingsDialog
-from update_checker import UpdateCheckError, check_for_update
+from update_checker import UpdateCheckError, UpdateInfo, check_for_update
 from version import __version__ as APP_VERSION
 
 def _make_tray_icon(accent_hex: str) -> QIcon:
@@ -64,11 +64,10 @@ class HaulHUDApp:
         self.update_check_worker: UpdateCheckWorker | None = None
         self._dialog_update_worker: UpdateCheckWorker | None = None
         self._update_check_is_silent = True
+        self._pending_update_info: UpdateInfo | None = None
+        self.tray.messageClicked.connect(self._on_tray_message_clicked)
 
-        # Give the window/tray a moment to settle before popping the
-        # update dialog, so it doesn't appear before the app has finished
-        # showing on screen.
-        QTimer.singleShot(1500, lambda: self._check_for_updates(silent=True))
+        self._check_for_updates(silent=True)
 
     def _build_tray_menu(self) -> None:
         menu = QMenu()
@@ -141,40 +140,42 @@ class HaulHUDApp:
 
     def _on_update_check_ok(self, info: object) -> None:
         if info is not None:
-            print(f"[HaulHUD] Update available: v{info.latest_version} (current v{APP_VERSION})")
-            box = QMessageBox()
-            box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-            box.setWindowTitle("Update available")
-            box.setIcon(QMessageBox.Icon.Information)
-            box.setText(
-                f"A new version is available: v{info.latest_version}\n"
-                f"You have: v{APP_VERSION}"
-            )
-            view_btn = box.addButton("View Release", QMessageBox.ButtonRole.AcceptRole)
-            box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
-            box.exec()
-            if box.clickedButton() is view_btn:
-                QDesktopServices.openUrl(QUrl(info.release_url))
+            self._pending_update_info = info
+            if self._update_check_is_silent:
+                self.tray.showMessage(
+                    "HaulHUD update available",
+                    f"v{info.latest_version} is available (you have v{APP_VERSION}). "
+                    "Click here, or use Check for Updates in the tray menu, to view it.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    8000,
+                )
+            else:
+                box = QMessageBox()
+                box.setWindowTitle("Update available")
+                box.setIcon(QMessageBox.Icon.Information)
+                box.setText(
+                    f"A new version is available: v{info.latest_version}\n"
+                    f"You have: v{APP_VERSION}"
+                )
+                view_btn = box.addButton("View Release", QMessageBox.ButtonRole.AcceptRole)
+                box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+                box.exec()
+                if box.clickedButton() is view_btn:
+                    QDesktopServices.openUrl(QUrl(info.release_url))
         elif not self._update_check_is_silent:
-            box = QMessageBox()
-            box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-            box.setWindowTitle("No updates available")
-            box.setIcon(QMessageBox.Icon.Information)
-            box.setText(f"You're running the latest version (v{APP_VERSION}).")
-            box.exec()
-        else:
-            print(f"[HaulHUD] No update available (current v{APP_VERSION} is latest).")
+            QMessageBox.information(
+                None,
+                "No updates available",
+                f"You're running the latest version (v{APP_VERSION}).",
+            )
 
     def _on_update_check_failed(self, message: str) -> None:
         if not self._update_check_is_silent:
-            box = QMessageBox()
-            box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-            box.setWindowTitle("Update check failed")
-            box.setIcon(QMessageBox.Icon.Warning)
-            box.setText(message)
-            box.exec()
-        else:
-            print(f"[HaulHUD] Silent update check failed: {message}")
+            QMessageBox.warning(None, "Update check failed", message)
+
+    def _on_tray_message_clicked(self) -> None:
+        if self._pending_update_info is not None:
+            QDesktopServices.openUrl(QUrl(self._pending_update_info.release_url))
 
     def _quit(self) -> None:
         self.window.close()

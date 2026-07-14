@@ -82,6 +82,8 @@ class OverlaySettings:
 
     income_currency_code: str = "EUR"
     income_currency_multiplier: float = 1.0
+    cargo_damage_cost: float = 5.0
+    cargo_damage_cost_factor: float = 0.04
 
     fields_visible: dict[str, bool] = field(default_factory=lambda: dict(DEFAULT_FIELDS_VISIBLE))
     field_order: list[str] = field(default_factory=lambda: list(DEFAULT_FIELDS_VISIBLE.keys()))

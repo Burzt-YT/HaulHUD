@@ -85,26 +85,6 @@ class EmaSmoother:
         self._last_time = None
 
 class PaceCalibrator:
-    """
-    Learns how this player's actual driving pace compares to the speed
-    limit of whatever road they're currently on, and turns that into a
-    correction factor for the game's own route-time estimate.
-
-    Why not just compute time-to-arrival as distance / current speed?
-    ETS2/ATS telemetry has no route or GPS data -- there's no way for
-    an outside reader to know how much of the remaining route is open
-    road versus a town center versus a different country's speed
-    limits, and the game's internal time-scale swings hard between
-    those (roughly 1:19 out of town vs. 1:3 in town, per the game's own
-    map-scale documentation). A naive distance/speed estimate also
-    collapses to a huge (or infinite) ETA the instant the truck stops
-    at a light. The game's own "navigation.estimatedTime" already has
-    full knowledge of the road ahead, so it stays the base estimate;
-    this class just tracks whether *this* player tends to drive faster
-    or slower than the posted limit and nudges that base estimate
-    accordingly, instead of assuming everyone drives exactly at the
-    speed limit.
-    """
 
     def __init__(self, half_life_s: float = 25.0) -> None:
         self._half_life_s = half_life_s
@@ -115,15 +95,8 @@ class PaceCalibrator:
         if paused:
             return
         if speed_limit_ms is None or speed_limit_ms < 3.0:
-            # No usable limit for the current road (off the classified
-            # network, or a momentary bad reading) -- don't let it
-            # distort the calibration.
             return
         if truck_speed_ms < 3.0:
-            # A momentary stop (light, junction, toll booth) isn't
-            # representative of cruising pace. Leave the running
-            # average as-is rather than let a red light suggest the
-            # whole remaining trip crawls.
             return
 
         sample = min(truck_speed_ms / speed_limit_ms, 2.0)
@@ -149,8 +122,6 @@ class PaceCalibrator:
     def pace_factor(self) -> float:
         if self._ratio_ema is None:
             return 1.0
-        # Clamp so a short unrepresentative burst can't send the ETA
-        # wildly optimistic or pessimistic.
         return max(0.5, min(1.6, self._ratio_ema))
 
     def reset(self) -> None:
@@ -158,18 +129,6 @@ class PaceCalibrator:
         self._last_time = None
 
 class SmoothCountdown:
-    """
-    Ticks a countdown down in real time between updates instead of
-    hopping to a freshly computed estimate on every telemetry poll.
-
-    Small differences between where the display currently sits and the
-    newest estimate are corrected gradually, like a low-pass filter on
-    the countdown's anchor, so normal noise doesn't visibly move the
-    number. Large differences (a new leg of the route, entering or
-    leaving a town where the map's time-scale jumps, resuming after a
-    long pause) are applied immediately -- hiding those would just make
-    the number wrong, not smoother.
-    """
 
     def __init__(self, correction_half_life_s: float = 6.0) -> None:
         self._correction_half_life_s = correction_half_life_s
@@ -210,27 +169,7 @@ class SmoothCountdown:
         self._anchor_time = None
 
 class RestCycleEstimator:
-    """
-    Learns how many in-game minutes pass between mandatory rests, by
-    remembering the highest "minutes until next rest" reading seen so
-    far this session.
 
-    Why not hardcode it? ETS2's own default has changed between game
-    versions (historically 660 in-game minutes of driving between
-    rests; a recent update reworked the whole fatigue system), it can
-    be turned off entirely, and it's a plain config value
-    (economy_data.sii) that plenty of players mod. But whatever the
-    real number is for this player's current version/settings/mods,
-    the countdown reliably resets to (approximately) that same full
-    value every time a rest completes -- so the running maximum of
-    what we've actually observed converges on the truth without
-    needing to know any of that in advance.
-    """
-
-    # Only used before we've observed a real reset this session (e.g.
-    # right after connecting, mid-cycle). Historical ETS2 default --
-    # 11 in-game hours of driving between mandatory rests. Overwritten
-    # the moment we see this player's actual value.
     FALLBACK_CYCLE_MINUTES = 660.0
 
     def __init__(self) -> None:
@@ -244,10 +183,6 @@ class RestCycleEstimator:
             return
 
         if self._observed_max is None:
-            # First reading of the session. Could be a fresh full cycle,
-            # or could be mid-cycle if we connected after the player was
-            # already driving -- we don't know yet, so this counts as an
-            # initial guess, not a confirmed cycle length.
             self._observed_max = rest_stop_minutes
             self._last_value = rest_stop_minutes
             return
@@ -256,9 +191,6 @@ class RestCycleEstimator:
             self._seen_decrease_since_max = True
 
         if rest_stop_minutes > self._observed_max and self._seen_decrease_since_max:
-            # The countdown climbed back up past our best guess after
-            # actually counting down first -- that's a real rest
-            # completing, not just noise, so this value is trustworthy.
             self._observed_max = rest_stop_minutes
             self._seen_decrease_since_max = False
             self._confirmed = True
@@ -271,12 +203,7 @@ class RestCycleEstimator:
 
     @property
     def is_confirmed(self) -> bool:
-        """
-        True once we've watched the countdown actually run down and
-        reset at least once this session, so cycle_minutes reflects a
-        real observed rest cycle rather than a first-reading guess that
-        might have caught the player mid-cycle.
-        """
+
         return self._confirmed
 
     def reset(self) -> None:
@@ -290,12 +217,7 @@ def breaks_needed_for_route(
     minutes_to_first_break: float,
     cycle_minutes: float,
 ) -> int:
-    """
-    How many mandatory rests will be needed before covering
-    remaining_game_minutes of driving, given minutes_to_first_break
-    until the next one is due and cycle_minutes between the ones after
-    that. All in in-game minutes.
-    """
+
     if remaining_game_minutes <= minutes_to_first_break:
         return 0
     if cycle_minutes <= 0:
@@ -409,6 +331,19 @@ def format_distance_km(meters: float) -> str:
         return f"{km:.1f} km"
     return f"{km:.0f} km"
 
+def estimate_income_after_damage(
+    base_income: float,
+    cargo_damage_fraction: float,
+    cargo_damage_cost: float = 5.0,
+    cargo_damage_cost_factor: float = 0.04,
+) -> float:
+
+    if base_income <= 0 or cargo_damage_fraction <= 0:
+        return base_income
+    damage_pct = cargo_damage_fraction * 100.0
+    penalty = damage_pct * (cargo_damage_cost + base_income * cargo_damage_cost_factor)
+    return max(0.0, base_income - penalty)
+
 @dataclass
 class DerivedInfo:
     connected: bool
@@ -438,6 +373,7 @@ class DerivedInfo:
     source_city: str
     destination_city: str
     income: int
+    income_after_damage: float
     job_market: str
 
 def derive(
@@ -452,6 +388,8 @@ def derive(
     pace_calibrator: "PaceCalibrator | None" = None,
     rest_cycle_estimator: "RestCycleEstimator | None" = None,
     break_real_minutes: float = 2.0,
+    cargo_damage_cost: float = 5.0,
+    cargo_damage_cost_factor: float = 0.04,
 ) -> DerivedInfo:
     if not frame.game_connected:
         if rest_countdown is not None:
@@ -479,7 +417,8 @@ def derive(
             rest_seconds_left_real=None, rest_display="N/A", rest_urgent=False,
             breaks_needed=None, breaks_display="N/A",
             truck_speed_kmh=0.0, cargo_damage_pct=0.0, planned_distance_km=0,
-            cargo_name="", source_city="", destination_city="", income=0, job_market="",
+            cargo_name="", source_city="", destination_city="", income=0,
+            income_after_damage=0.0, job_market="",
         )
 
     if scale_estimator is not None:
@@ -522,10 +461,6 @@ def derive(
     if rest_cycle_estimator is not None:
         rest_cycle_estimator.update(frame.rest_stop_minutes)
 
-    # Game-seconds remaining to arrival, corrected for how this player
-    # actually drives relative to the limit (same pace_factor used for
-    # the real-time ETA below) -- this is what fatigue accrues against,
-    # so it's what the breaks-needed estimate should use too.
     calibrated_game_seconds_remaining = None
     if frame.nav_time_s is not None and frame.nav_time_s >= 0:
         calibrated_game_seconds_remaining = frame.nav_time_s / pace_factor
@@ -626,5 +561,8 @@ def derive(
         source_city=frame.source_city,
         destination_city=frame.destination_city,
         income=frame.income,
+        income_after_damage=estimate_income_after_damage(
+            frame.income, frame.cargo_damage_pct, cargo_damage_cost, cargo_damage_cost_factor
+        ),
         job_market=frame.job_market,
     )

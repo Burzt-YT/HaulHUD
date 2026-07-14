@@ -1,5 +1,1 @@
 put haulhud_plugin.dll at C:\Program Files (x86)\Steam\steamapps\common\Euro Truck Simulator 2\bin\win_x64\plugins or where u have installed ETS2
-
-
-run:
-go in to overlay and run run.bat

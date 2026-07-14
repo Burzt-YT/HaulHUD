@@ -69,15 +69,6 @@ class OverlayWindow(QWidget):
 
         self._nav_scale_estimator = ScaleEstimator()
 
-        # The game's own route-time estimate is the best source we have
-        # (it knows the actual road ahead; we don't), but it's reported
-        # in game-seconds through a local time-scale that swings hard
-        # between open road and towns. SmoothCountdown keeps the
-        # on-screen number ticking steadily instead of hopping on every
-        # poll, PaceCalibrator nudges the estimate to match how this
-        # player actually drives relative to the speed limit, and the
-        # two short EmaSmoothers just take the edge off ordinary sensor
-        # jitter in distance/speed so digits don't flicker.
         self._nav_time_smoother = SmoothCountdown()
         self._nav_distance_smoother = EmaSmoother(half_life_s=1.0)
         self._speed_smoother = EmaSmoother(half_life_s=0.7)
@@ -245,6 +236,8 @@ class OverlayWindow(QWidget):
             pace_calibrator=self._pace_calibrator,
             rest_cycle_estimator=self._rest_cycle_estimator,
             break_real_minutes=self.settings.break_duration_min,
+            cargo_damage_cost=self.settings.cargo_damage_cost,
+            cargo_damage_cost_factor=self.settings.cargo_damage_cost_factor,
         )
         self._render(info)
 
@@ -297,7 +290,7 @@ class OverlayWindow(QWidget):
         route_text = f"{info.source_city} -> {info.destination_city}" if info.destination_city else "--"
         self._set_value("job_route", route_text)
 
-        converted_income = info.income * self.settings.income_currency_multiplier
+        converted_income = info.income_after_damage * self.settings.income_currency_multiplier
         symbol, _ = INCOME_CURRENCIES.get(self.settings.income_currency_code, ("", 1.0))
         self._set_value("income", f"{symbol}{converted_income:,.0f}")
 

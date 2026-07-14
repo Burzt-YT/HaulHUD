@@ -3,7 +3,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QSlider,
     QDoubleSpinBox, QSpinBox, QLineEdit, QPushButton, QGroupBox, QFormLayout,
-    QComboBox, QListWidget, QListWidgetItem
+    QComboBox, QListWidget, QListWidgetItem, QMessageBox
 )
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
@@ -19,11 +19,6 @@ class SettingsDialog(QDialog):
         self.setMinimumWidth(380)
         self.settings = settings
         self.on_apply = on_apply
-        # Callback into HaulHUDApp's existing update-check machinery
-        # (UpdateCheckWorker / check_for_update) rather than duplicating
-        # networking/threading here. Signature:
-        #   on_check_updates(on_result, on_error) -> None
-        # where on_result(info: UpdateInfo | None) and on_error(msg: str).
         self.on_check_updates = on_check_updates
         self._checking_updates = False
         self._closed = False
@@ -127,6 +122,34 @@ class SettingsDialog(QDialog):
         )
         bform.addRow("Income currency multiplier", self.currency_multiplier_spin)
 
+        self.damage_flat_cost_spin = QDoubleSpinBox()
+        self.damage_flat_cost_spin.setRange(0.0, 1000.0)
+        self.damage_flat_cost_spin.setDecimals(2)
+        self.damage_flat_cost_spin.setSingleStep(0.5)
+        self.damage_flat_cost_spin.setValue(settings.cargo_damage_cost)
+        self.damage_flat_cost_spin.setToolTip(
+            "Flat currency cost deducted per 1% cargo damage (game's "
+            "economy_data.sii: cargo_damage_cost, default 5). Combined "
+            "with the percentage cost below to estimate the 'Expected "
+            "income' field's damage penalty. Not fetched live -- edit if "
+            "it turns out to not match your game/mod version."
+        )
+        bform.addRow("Damage cost (flat, per 1%)", self.damage_flat_cost_spin)
+
+        self.damage_pct_factor_spin = QDoubleSpinBox()
+        self.damage_pct_factor_spin.setRange(0.0, 1.0)
+        self.damage_pct_factor_spin.setDecimals(4)
+        self.damage_pct_factor_spin.setSingleStep(0.01)
+        self.damage_pct_factor_spin.setValue(settings.cargo_damage_cost_factor)
+        self.damage_pct_factor_spin.setToolTip(
+            "Fraction of base income deducted per 1% cargo damage (game's "
+            "economy_data.sii: cargo_damage_cost_factor, default 0.04, "
+            "i.e. -4% of income per 1% damage). Added to the flat cost "
+            "above; this is an approximation of the game's real formula, "
+            "not independently verified against many deliveries."
+        )
+        bform.addRow("Damage cost (% of income, per 1%)", self.damage_pct_factor_spin)
+
         layout.addWidget(behavior_box)
 
         updates_box = QGroupBox("Updates")
@@ -182,6 +205,14 @@ class SettingsDialog(QDialog):
         layout.addWidget(fields_box)
 
         button_row = QHBoxLayout()
+        restore_defaults_btn = QPushButton("Restore Defaults")
+        restore_defaults_btn.setToolTip(
+            "Resets appearance, behavior, currency, damage-cost, and "
+            "field-visibility settings back to their defaults. Window "
+            "position, size, and UI scale are left as-is."
+        )
+        restore_defaults_btn.clicked.connect(self._restore_defaults)
+        button_row.addWidget(restore_defaults_btn)
         save_btn = QPushButton("Save")
         save_btn.clicked.connect(self._save)
         cancel_btn = QPushButton("Cancel")
@@ -238,6 +269,70 @@ class SettingsDialog(QDialog):
             _, rate = INCOME_CURRENCIES[code]
             self.currency_multiplier_spin.setValue(rate)
 
+    def _restore_defaults(self) -> None:
+        confirm = QMessageBox.question(
+            self,
+            "Restore Defaults",
+            "Reset appearance, behavior, currency, damage-cost, and field "
+            "settings to their defaults?\n\n"
+            "Window position, size, and UI scale won't be affected.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        defaults = OverlaySettings()
+        s = self.settings
+
+        s.click_through = defaults.click_through
+        s.toggle_interactive_hotkey = defaults.toggle_interactive_hotkey
+        s.theme = defaults.theme
+        s.accent_color = defaults.accent_color
+        s.background_color = defaults.background_color
+        s.text_color = defaults.text_color
+        s.urgent_color = defaults.urgent_color
+        s.font_family = defaults.font_family
+        s.font_size = defaults.font_size
+        s.corner_radius = defaults.corner_radius
+        s.opacity = defaults.opacity
+        s.poll_interval_ms = defaults.poll_interval_ms
+        s.rest_urgent_threshold_min = defaults.rest_urgent_threshold_min
+        s.hide_when_no_job = defaults.hide_when_no_job
+        s.hide_when_game_not_running = defaults.hide_when_game_not_running
+        s.break_duration_min = defaults.break_duration_min
+        s.income_currency_code = defaults.income_currency_code
+        s.income_currency_multiplier = defaults.income_currency_multiplier
+        s.cargo_damage_cost = defaults.cargo_damage_cost
+        s.cargo_damage_cost_factor = defaults.cargo_damage_cost_factor
+        s.fields_visible = dict(defaults.fields_visible)
+        s.field_order = list(defaults.field_order)
+
+        self._sync_widgets_from_settings()
+
+        s.save()
+        self.on_apply()
+
+    def _sync_widgets_from_settings(self) -> None:
+        s = self.settings
+        self.theme_combo.setCurrentText(s.theme)
+        self.opacity_slider.setValue(int(s.opacity * 100))
+        self.font_size_spin.setValue(s.font_size)
+        self.hotkey_edit.setText(s.toggle_interactive_hotkey)
+        self.click_through_check.setChecked(s.click_through)
+        self.rest_threshold_spin.setValue(s.rest_urgent_threshold_min)
+        self.break_duration_spin.setValue(s.break_duration_min)
+        self.poll_interval_spin.setValue(s.poll_interval_ms)
+        self.hide_no_job_check.setChecked(s.hide_when_no_job)
+        self.hide_not_running_check.setChecked(s.hide_when_game_not_running)
+        if s.income_currency_code in INCOME_CURRENCIES:
+            self.currency_combo.setCurrentText(s.income_currency_code)
+        self.currency_multiplier_spin.setValue(s.income_currency_multiplier)
+        self.damage_flat_cost_spin.setValue(s.cargo_damage_cost)
+        self.damage_pct_factor_spin.setValue(s.cargo_damage_cost_factor)
+        for key, cb in self.field_checks.items():
+            cb.setChecked(s.fields_visible.get(key, True))
+
     def _save(self) -> None:
         s = self.settings
         s.theme = self.theme_combo.currentText()
@@ -258,6 +353,8 @@ class SettingsDialog(QDialog):
         s.hide_when_game_not_running = self.hide_not_running_check.isChecked()
         s.income_currency_code = self.currency_combo.currentText()
         s.income_currency_multiplier = self.currency_multiplier_spin.value()
+        s.cargo_damage_cost = self.damage_flat_cost_spin.value()
+        s.cargo_damage_cost_factor = self.damage_pct_factor_spin.value()
         for key, cb in self.field_checks.items():
             s.fields_visible[key] = cb.isChecked()
 
